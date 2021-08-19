@@ -1,14 +1,29 @@
 const hre = require("hardhat");
 
+async function deploy(contractName, params){
+  const Contract = await hre.ethers.getContractFactory(contractName);
+  const contract = await Contract.deploy(...params);
+  await contract.deployed();
+  return contract.address
+}
+
+// In blocks
+const votingPeriod = 1
+const votingDelay = 1
+// Multiply by 1e18
+const proposalThreshold = 1
+
 async function main() {
+  const [owner] = await hre.ethers.getSigners();
 
   await hre.run('compile');
-  const Greeter = await hre.ethers.getContractFactory("Greeter");
-  const greeter = await Greeter.deploy("Hello, Hardhat!");
+  const token = await deploy("Comp", [owner]);
+  const implementation = await deploy("GovernorBravoDelegate", [])
+  const proxy = await deploy("GovernorBravoDelegator", [token, votingPeriod, votingDelay, proposalThreshold])
 
-  await greeter.deployed();
-
-  console.log("Greeter deployed to:", greeter.address);
+  console.log("Token deployed to:", token);
+  console.log("Governance deployed to:", proxy);
+  console.log("Proxy implementation deployed to:", implementation);
 }
 
 main()
