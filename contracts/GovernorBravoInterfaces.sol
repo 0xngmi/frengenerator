@@ -97,9 +97,6 @@ contract GovernorBravoDelegateStorageV1 is GovernorBravoDelegatorStorage {
         /// @notice Creator of the proposal
         address proposer;
 
-        /// @notice The timestamp that the proposal will be available for execution, set once the vote succeeds
-        uint eta;
-
         /// @notice the ordered list of target addresses for calls to be made
         address[] targets;
 

@@ -40,22 +40,19 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
 
     /**
       * @notice Used to initialize the contract during delegator contructor
-      * @param timelock_ The address of the Timelock
       * @param comp_ The address of the COMP token
       * @param votingPeriod_ The initial voting period
       * @param votingDelay_ The initial voting delay
       * @param proposalThreshold_ The initial proposal threshold
       */
-    function initialize(address timelock_, address comp_, uint votingPeriod_, uint votingDelay_, uint proposalThreshold_) public {
-        require(address(timelock) == address(0), "GovernorBravo::initialize: can only initialize once");
+    function initialize(address comp_, uint votingPeriod_, uint votingDelay_, uint proposalThreshold_) public {
+        require(address(comp) == address(0), "GovernorBravo::initialize: can only initialize once");
         require(msg.sender == admin, "GovernorBravo::initialize: admin only");
-        require(timelock_ != address(0), "GovernorBravo::initialize: invalid timelock address");
         require(comp_ != address(0), "GovernorBravo::initialize: invalid comp address");
         require(votingPeriod_ >= MIN_VOTING_PERIOD && votingPeriod_ <= MAX_VOTING_PERIOD, "GovernorBravo::initialize: invalid voting period");
         require(votingDelay_ >= MIN_VOTING_DELAY && votingDelay_ <= MAX_VOTING_DELAY, "GovernorBravo::initialize: invalid voting delay");
         require(proposalThreshold_ >= MIN_PROPOSAL_THRESHOLD && proposalThreshold_ <= MAX_PROPOSAL_THRESHOLD, "GovernorBravo::initialize: invalid proposal threshold");
 
-        timelock = TimelockInterface(timelock_);
         comp = CompInterface(comp_);
         votingPeriod = votingPeriod_;
         votingDelay = votingDelay_;
@@ -93,7 +90,6 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
         Proposal memory newProposal = Proposal({
             id: proposalCount,
             proposer: msg.sender,
-            eta: 0,
             targets: targets,
             values: values,
             signatures: signatures,
@@ -115,55 +111,33 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
     }
 
     /**
-      * @notice Queues a proposal of state succeeded
-      * @param proposalId The id of the proposal to queue
-      */
-    function queue(uint proposalId) external {
-        require(state(proposalId) == ProposalState.Succeeded, "GovernorBravo::queue: proposal can only be queued if it is succeeded");
-        Proposal storage proposal = proposals[proposalId];
-        uint eta = add256(block.timestamp, timelock.delay());
-        for (uint i = 0; i < proposal.targets.length; i++) {
-            queueOrRevertInternal(proposal.targets[i], proposal.values[i], proposal.signatures[i], proposal.calldatas[i], eta);
-        }
-        proposal.eta = eta;
-        emit ProposalQueued(proposalId, eta);
-    }
-
-    function queueOrRevertInternal(address target, uint value, string memory signature, bytes memory data, uint eta) internal {
-        require(!timelock.queuedTransactions(keccak256(abi.encode(target, value, signature, data, eta))), "GovernorBravo::queueOrRevertInternal: identical proposal action already queued at eta");
-        timelock.queueTransaction(target, value, signature, data, eta);
-    }
-
-    /**
       * @notice Executes a queued proposal if eta has passed
       * @param proposalId The id of the proposal to execute
       */
     function execute(uint proposalId) external payable {
-        require(state(proposalId) == ProposalState.Queued, "GovernorBravo::execute: proposal can only be executed if it is queued");
+        require(state(proposalId) == ProposalState.Succeeded, "GovernorBravo::execute: proposal can only be executed if it is succeeded");
         Proposal storage proposal = proposals[proposalId];
         proposal.executed = true;
         for (uint i = 0; i < proposal.targets.length; i++) {
-            timelock.executeTransaction.value(proposal.values[i])(proposal.targets[i], proposal.values[i], proposal.signatures[i], proposal.calldatas[i], proposal.eta);
+            executeTransaction(proposal.targets[i], proposal.values[i], proposal.signatures[i], proposal.calldatas[i]);
         }
         emit ProposalExecuted(proposalId);
     }
 
-    /**
-      * @notice Cancels a proposal only if sender is the proposer, or proposer delegates dropped below proposal threshold
-      * @param proposalId The id of the proposal to cancel
-      */
-    function cancel(uint proposalId) external {
-        require(state(proposalId) != ProposalState.Executed, "GovernorBravo::cancel: cannot cancel executed proposal");
+    function executeTransaction(address target, uint value, string memory signature, bytes memory data) private returns (bytes memory) {
+        bytes memory callData;
 
-        Proposal storage proposal = proposals[proposalId];
-        require(msg.sender == proposal.proposer || comp.getPriorVotes(proposal.proposer, sub256(block.number, 1)) < proposalThreshold, "GovernorBravo::cancel: proposer above threshold");
-
-        proposal.canceled = true;
-        for (uint i = 0; i < proposal.targets.length; i++) {
-            timelock.cancelTransaction(proposal.targets[i], proposal.values[i], proposal.signatures[i], proposal.calldatas[i], proposal.eta);
+        if (bytes(signature).length == 0) {
+            callData = data;
+        } else {
+            callData = abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
         }
 
-        emit ProposalCanceled(proposalId);
+        // solium-disable-next-line security/no-call-value
+        (bool success, bytes memory returnData) = target.call.value(value)(callData);
+        require(success, "Timelock::executeTransaction: Transaction execution reverted.");
+
+        return returnData;
     }
 
     /**
@@ -202,14 +176,10 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
             return ProposalState.Active;
         } else if (proposal.forVotes <= proposal.againstVotes || proposal.forVotes < quorumVotes) {
             return ProposalState.Defeated;
-        } else if (proposal.eta == 0) {
-            return ProposalState.Succeeded;
         } else if (proposal.executed) {
             return ProposalState.Executed;
-        } else if (block.timestamp >= add256(proposal.eta, timelock.GRACE_PERIOD())) {
-            return ProposalState.Expired;
         } else {
-            return ProposalState.Queued;
+            return ProposalState.Succeeded;
         }
     }
 
@@ -325,7 +295,6 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
         require(initialProposalId == 0, "GovernorBravo::_initiate: can only initiate once");
         proposalCount = GovernorAlpha(governorAlpha).proposalCount();
         initialProposalId = proposalCount;
-        timelock.acceptAdmin();
     }
 
     /**
@@ -384,5 +353,17 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
         uint chainId;
         assembly { chainId := chainid() }
         return chainId;
+    }
+
+    function onERC721Received(address _operator, address _from, uint256 _tokenId, bytes calldata _data) external returns(bytes4) {
+        return this.onERC721Received.selector;
+    }
+
+    function onERC1155Received(address _operator, address _from, uint256 _id, uint256 _value, bytes calldata _data) external returns(bytes4){
+        return this.onERC1155Received.selector;
+    }
+
+    function onERC1155BatchReceived(address _operator, address _from, uint256[] calldata _ids, uint256[] calldata _values, bytes calldata _data) external returns(bytes4){
+        return this.onERC1155BatchReceived.selector;
     }
 }

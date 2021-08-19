@@ -25,7 +25,7 @@ contract GovernorBravoDelegator is GovernorBravoDelegatorStorage, GovernorBravoE
 
         _setImplementation(implementation_);
 
-		admin = admin_;
+		admin = address(this);
 	}
 
 
