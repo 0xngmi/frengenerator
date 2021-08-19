@@ -1,0 +1,2 @@
+# frengenerator
+Create fren DAOs
